@@ -10,21 +10,22 @@ from vkbottle import Bot
 from vkbottle.bot import Message
 from vkbottle.api import API
 
-# Токен из переменной окружения хостинга
+# ====== ПОЛУЧЕНИЕ ТОКЕНА ======
+
 TOKEN: str | None = os.environ.get("VK_TOKEN")
 
 if not TOKEN:
+    TOKEN = "vk1.a.FaMM2CswZcJsSZ9ZlbZp5SEwDfTM2Adt1bYPYIFk4z1Ai6F0mHfB1mNFfMOlHJexidIbbj8Jlyt13mykczzVTduOncPtVY70K7m4ewYilUrnIJSlDOe-n_piKr_8LvsI6PwM1HD4v_44_kuKpB0oVP9MTQ05ucy5kAfn1YPOBnVO8_uze_5TdgdcVJct73gDxgiLAS1eOSgZ-mBUsOML1w"
+
+if not TOKEN:
     print("❌ Ошибка: Не указан VK_TOKEN!")
-    print("Добавьте переменную окружения VK_TOKEN в настройках хостинга")
     exit(1)
 
+print("✅ Токен загружен!")
 bot = Bot(token=TOKEN)
 
-# ID администраторов (кто имеет доступ к командам в любой беседе)
-ADMIN_IDS: list[int] = [
-    # Добавьте свои ID ВК
-    # Например: 123456789,
-]
+# ID администраторов
+ADMIN_IDS: list[int] = []
 
 
 async def get_user_id(api: API, mention_or_id: str) -> int:
