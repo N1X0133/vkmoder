@@ -27,9 +27,8 @@ DATABASE_URL: str | None = os.environ.get("DATABASE_URL")
 if not DATABASE_URL:
     DATABASE_URL = "postgresql://bothost_db_c28f080200a2:VKQO5ZU113LDy3icJRRwwndTgaBNNp2KALyme49zAzU@node1.pghost.ru:15807/bothost_db_c28f080200a2"
 
-# Владельцы бота
 OWNER_IDS: list[int] = [
-    724970995,  # muf1337
+    724970995,
 ]
 
 print("✅ Конфигурация загружена!")
@@ -152,13 +151,7 @@ async def get_all_admins(chat_id: int):
 
 # ====== ВСПОМОГАТЕЛЬНЫЕ ======
 
-async def is_admin(api: API, chat_id: int, user_id: int) -> bool:
-    if user_id in OWNER_IDS:
-        return True
-    
-    if await is_bot_admin(chat_id, user_id):
-        return True
-    
+async def is_chat_admin(api: API, chat_id: int, user_id: int) -> bool:
     try:
         members = await api.messages.get_conversation_members(
             peer_id=2000000000 + chat_id
@@ -171,6 +164,16 @@ async def is_admin(api: API, chat_id: int, user_id: int) -> bool:
     return False
 
 
+async def is_admin(api: API, chat_id: int, user_id: int) -> bool:
+    if user_id in OWNER_IDS:
+        return True
+    if await is_bot_admin(chat_id, user_id):
+        return True
+    if await is_chat_admin(api, chat_id, user_id):
+        return True
+    return False
+
+
 async def check_admin(message: Message, chat_id: int) -> bool:
     if await is_admin(bot.api, chat_id, message.from_id):
         return True
@@ -178,18 +181,27 @@ async def check_admin(message: Message, chat_id: int) -> bool:
     return False
 
 
-async def check_owner(message: Message) -> bool:
-    if message.from_id in OWNER_IDS:
-        return True
-    await message.answer("❌ Только владелец бота может использовать эту команду")
-    return False
-
-
 def get_chat_id(message: Message) -> int:
     return message.peer_id - 2000000000
 
 
+async def get_display_name(api: API, chat_id: int, user_id: int) -> str:
+    """Получить отображаемое имя: ник если есть, иначе имя из ВК"""
+    nick = await get_nick(chat_id, user_id)
+    if nick:
+        return nick
+    
+    try:
+        user_info = await api.users.get(user_ids=[user_id])
+        if user_info:
+            return f"{user_info[0].first_name} {user_info[0].last_name}"
+    except:
+        pass
+    return f"id{user_id}"
+
+
 async def get_user_name(api: API, user_id: int) -> str:
+    """Получить реальное имя из ВК"""
     try:
         user_info = await api.users.get(user_ids=[user_id])
         if user_info:
@@ -200,12 +212,10 @@ async def get_user_name(api: API, user_id: int) -> str:
 
 
 def user_link(user_id: int, name: str) -> str:
-    """Создать кликабельную ссылку"""
     return f"@id{user_id}({name})"
 
 
 async def resolve_user(api: API, text: str) -> int:
-    """Получить ID из упоминания, ссылки или ID"""
     text = text.strip()
     
     if text.isdigit():
@@ -259,10 +269,10 @@ async def help_handler(message: Message):
 /gnick @user — узнать ник
 /nlist — список всех ников
 
-👑 Админы (владелец):
+👑 Админы:
 /addadmin @user — дать доступ
 /deladmin @user — забрать доступ
-/adminlist — список админов
+/adminlist — список админов бота
 
 💡 Можно: @user, vk.com/user, vk.com/id123, ID
 """)
@@ -291,11 +301,11 @@ async def kick_handler(message: Message, user: str = None):
     try:
         await bot.api.messages.remove_chat_user(chat_id=chat_id, member_id=target_id)
         
-        admin_name = await get_user_name(bot.api, message.from_id)
-        target_name = await get_user_name(bot.api, target_id)
+        admin_display = await get_display_name(bot.api, chat_id, message.from_id)
+        target_display = await get_display_name(bot.api, chat_id, target_id)
         
         await message.answer(
-            f"✅ {user_link(message.from_id, admin_name)} кикнул {user_link(target_id, target_name)}.",
+            f"✅ {user_link(message.from_id, admin_display)} кикнул {user_link(target_id, target_display)}.",
             disable_mentions=0
         )
     except Exception as e:
@@ -326,11 +336,11 @@ async def ban_handler(message: Message, user: str = None):
         await bot.api.messages.remove_chat_user(chat_id=chat_id, member_id=target_id)
         await bot.api.groups.ban(group_id=message.group_id, owner_id=target_id)
         
-        admin_name = await get_user_name(bot.api, message.from_id)
-        target_name = await get_user_name(bot.api, target_id)
+        admin_display = await get_display_name(bot.api, chat_id, message.from_id)
+        target_display = await get_display_name(bot.api, chat_id, target_id)
         
         await message.answer(
-            f"✅ {user_link(message.from_id, admin_name)} забанил {user_link(target_id, target_name)}.",
+            f"✅ {user_link(message.from_id, admin_display)} забанил {user_link(target_id, target_display)}.",
             disable_mentions=0
         )
     except Exception as e:
@@ -357,11 +367,11 @@ async def unban_handler(message: Message, user: str = None):
     try:
         await bot.api.groups.unban(group_id=message.group_id, owner_id=target_id)
         
-        admin_name = await get_user_name(bot.api, message.from_id)
-        target_name = await get_user_name(bot.api, target_id)
+        admin_display = await get_display_name(bot.api, chat_id, message.from_id)
+        target_display = await get_display_name(bot.api, chat_id, target_id)
         
         await message.answer(
-            f"✅ {user_link(message.from_id, admin_name)} разбанил {user_link(target_id, target_name)}.",
+            f"✅ {user_link(message.from_id, admin_display)} разбанил {user_link(target_id, target_display)}.",
             disable_mentions=0
         )
     except Exception as e:
@@ -405,12 +415,12 @@ async def snick_handler(message: Message, user: str = None, nick: str = None):
         return await message.answer("❌ Ник содержит запрещённые символы")
     
     target_name = await get_user_name(bot.api, target_id)
-    admin_name = await get_user_name(bot.api, message.from_id)
+    admin_display = await get_display_name(bot.api, chat_id, message.from_id)
     
     await set_nick(chat_id, target_id, new_nick, message.from_id)
     
     await message.answer(
-        f"✅ {user_link(message.from_id, admin_name)} поставил никнейм '{new_nick}' {user_link(target_id, target_name)}.",
+        f"✅ {user_link(message.from_id, admin_display)} поставил никнейм '{new_nick}' {user_link(target_id, target_name)}.",
         disable_mentions=0
     )
 
@@ -432,14 +442,14 @@ async def rnick_handler(message: Message, user: str = None):
     if not target_id:
         return await message.answer("❌ Укажите пользователя: /rnick @user")
     
-    admin_name = await get_user_name(bot.api, message.from_id)
+    admin_display = await get_display_name(bot.api, chat_id, message.from_id)
     target_name = await get_user_name(bot.api, target_id)
     
     old_nick = await remove_nick(chat_id, target_id)
     
     if old_nick:
         await message.answer(
-            f"🗑️ {user_link(message.from_id, admin_name)} удалил никнейм {user_link(target_id, target_name)}.",
+            f"🗑️ {user_link(message.from_id, admin_display)} удалил никнейм {user_link(target_id, target_name)}.",
             disable_mentions=0
         )
     else:
@@ -462,17 +472,17 @@ async def gnick_handler(message: Message, user: str = None):
     if not target_id:
         return await message.answer("❌ Укажите пользователя: /gnick @user")
     
-    target_name = await get_user_name(bot.api, target_id)
+    target_display = await get_display_name(bot.api, chat_id, target_id)
     nick = await get_nick(chat_id, target_id)
     
     if nick:
         await message.answer(
-            f"🔍 Никнейм {user_link(target_id, target_name)} — '{nick}'.",
+            f"🔍 Никнейм {user_link(target_id, target_display)} — '{nick}'.",
             disable_mentions=0
         )
     else:
         await message.answer(
-            f"🔍 У {user_link(target_id, target_name)} нет ника.",
+            f"🔍 У {user_link(target_id, target_display)} нет ника.",
             disable_mentions=0
         )
 
@@ -502,8 +512,9 @@ async def nlist_handler(message: Message):
 async def addadmin_handler(message: Message, user: str = None):
     chat_id = get_chat_id(message)
     
-    if not await check_owner(message):
-        return
+    if message.from_id not in OWNER_IDS:
+        if not await is_chat_admin(bot.api, chat_id, message.from_id):
+            return await message.answer("❌ У вас нет прав")
     
     target_id = get_target(message, user)
     
@@ -514,12 +525,12 @@ async def addadmin_handler(message: Message, user: str = None):
         return await message.answer("❌ Укажите пользователя: /addadmin @user")
     
     target_name = await get_user_name(bot.api, target_id)
-    admin_name = await get_user_name(bot.api, message.from_id)
+    admin_display = await get_display_name(bot.api, chat_id, message.from_id)
     
     await add_admin(chat_id, target_id, message.from_id)
     
     await message.answer(
-        f"✅ {user_link(message.from_id, admin_name)} выдал права админа {user_link(target_id, target_name)}.",
+        f"✅ {user_link(message.from_id, admin_display)} выдал права админа {user_link(target_id, target_name)}.",
         disable_mentions=0
     )
 
@@ -530,8 +541,9 @@ async def addadmin_handler(message: Message, user: str = None):
 async def deladmin_handler(message: Message, user: str = None):
     chat_id = get_chat_id(message)
     
-    if not await check_owner(message):
-        return
+    if message.from_id not in OWNER_IDS:
+        if not await is_chat_admin(bot.api, chat_id, message.from_id):
+            return await message.answer("❌ У вас нет прав")
     
     target_id = get_target(message, user)
     
@@ -545,13 +557,13 @@ async def deladmin_handler(message: Message, user: str = None):
         return await message.answer("❌ Нельзя удалить владельца")
     
     target_name = await get_user_name(bot.api, target_id)
-    admin_name = await get_user_name(bot.api, message.from_id)
+    admin_display = await get_display_name(bot.api, chat_id, message.from_id)
     
     removed = await remove_admin(chat_id, target_id)
     
     if removed:
         await message.answer(
-            f"✅ {user_link(message.from_id, admin_name)} забрал права админа у {user_link(target_id, target_name)}.",
+            f"✅ {user_link(message.from_id, admin_display)} забрал права админа у {user_link(target_id, target_name)}.",
             disable_mentions=0
         )
     else:
@@ -575,13 +587,13 @@ async def adminlist_handler(message: Message):
     text = "👑 Админы бота:\n\n"
     
     for owner_id in OWNER_IDS:
-        owner_name = await get_user_name(bot.api, owner_id)
-        text += f"• {user_link(owner_id, owner_name)} — 👑 владелец\n"
+        owner_display = await get_display_name(bot.api, chat_id, owner_id)
+        text += f"• {user_link(owner_id, owner_display)} — 👑 владелец\n"
     
     for row in admins:
-        admin_name = await get_user_name(bot.api, row['user_id'])
-        added_by_name = await get_user_name(bot.api, row['added_by'])
-        text += f"• {user_link(row['user_id'], admin_name)} — назначил {user_link(row['added_by'], added_by_name)}\n"
+        admin_display = await get_display_name(bot.api, chat_id, row['user_id'])
+        added_by_display = await get_display_name(bot.api, chat_id, row['added_by'])
+        text += f"• {user_link(row['user_id'], admin_display)} — назначил {user_link(row['added_by'], added_by_display)}\n"
     
     await message.answer(text, disable_mentions=0)
 
