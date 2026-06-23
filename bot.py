@@ -186,7 +186,6 @@ def get_chat_id(message: Message) -> int:
 
 
 async def get_display_name(api: API, chat_id: int, user_id: int) -> str:
-    """Получить отображаемое имя: ник если есть, иначе имя из ВК"""
     nick = await get_nick(chat_id, user_id)
     if nick:
         return nick
@@ -498,7 +497,7 @@ async def nlist_handler(message: Message):
         user_name = await get_user_name(bot.api, row['user_id'])
         text += f"{i}. {user_link(row['user_id'], user_name)} — {row['nick']}\n"
     
-    await message.answer(text, disable_mentions=0)
+    await message.answer(text, disable_mentions=1)
 
 
 # ====== ADDADMIN ======
@@ -590,7 +589,7 @@ async def adminlist_handler(message: Message):
         added_by_display = await get_display_name(bot.api, chat_id, row['added_by'])
         text += f"— {user_link(row['user_id'], admin_display)} (назначил {user_link(row['added_by'], added_by_display)})\n"
     
-    await message.answer(text, disable_mentions=0)
+    await message.answer(text, disable_mentions=1)
 
 
 # ====== ЗАПУСК ======
