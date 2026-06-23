@@ -1,62 +1,120 @@
 """
 Бот-администратор для ВКонтакте
 Python 3.11+
-Функции: кик, бан, разбан, установка ника
+Функции: кик, бан, разбан, управление никами
+База данных: PostgreSQL
 """
 
 import os
 import re
+import asyncio
+import asyncpg
 from vkbottle import Bot
 from vkbottle.bot import Message
 from vkbottle.api import API
 
-# ====== ПОЛУЧЕНИЕ ТОКЕНА ======
+# ====== НАСТРОЙКИ ======
 
+# Токен ВК
 TOKEN: str | None = os.environ.get("VK_TOKEN")
-
-if not TOKEN:
-    TOKEN = "vk1.a.FaMM2CswZcJsSZ9ZlbZp5SEwDfTM2Adt1bYPYIFk4z1Ai6F0mHfB1mNFfMOlHJexidIbbj8Jlyt13mykczzVTduOncPtVY70K7m4ewYilUrnIJSlDOe-n_piKr_8LvsI6PwM1HD4v_44_kuKpB0oVP9MTQ05ucy5kAfn1YPOBnVO8_uze_5TdgdcVJct73gDxgiLAS1eOSgZ-mBUsOML1w"
-
 if not TOKEN:
     print("❌ Ошибка: Не указан VK_TOKEN!")
     exit(1)
 
-print("✅ Токен загружен!")
-bot = Bot(token=TOKEN)
+# База данных
+DATABASE_URL: str | None = os.environ.get("DATABASE_URL")
+if not DATABASE_URL:
+    DATABASE_URL = "postgresql://bothost_db_c28f080200a2:VKQO5ZU113LDy3icJRRwwndTgaBNNp2KALyme49zAzU@node1.pghost.ru:15807/bothost_db_c28f080200a2"
 
 # ID администраторов
-ADMIN_IDS: list[int] = []
+ADMIN_IDS: list[int] = [
+    # 123456789,  # ваш ID
+]
+
+bot = Bot(token=TOKEN)
+db_pool: asyncpg.Pool | None = None
 
 
-async def get_user_id(api: API, mention_or_id: str) -> int:
-    """Получает числовой ID пользователя из разных форматов"""
-    if mention_or_id.isdigit():
-        return int(mention_or_id)
-    
-    match = re.search(r'\[id(\d+)\|', mention_or_id)
-    if match:
-        return int(match.group(1))
-    
-    match = re.search(r'vk\.com/id(\d+)', mention_or_id)
-    if match:
-        return int(match.group(1))
-    
-    match = re.search(r'vk\.com/([a-zA-Z0-9_.]+)', mention_or_id)
-    if match:
-        screen_name = match.group(1)
-        if screen_name not in ['id', 'club', 'public']:
-            try:
-                user = await api.utils.resolve_screen_name(screen_name=screen_name)
-                if user and user.type == 'user':
-                    return user.object_id
-            except Exception:
-                pass
-    
-    return 0
+# ====== РАБОТА С БАЗОЙ ДАННЫХ ======
 
+async def init_db():
+    """Инициализация базы данных"""
+    global db_pool
+    
+    try:
+        db_pool = await asyncpg.create_pool(DATABASE_URL)
+        
+        async with db_pool.acquire() as conn:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS nicks (
+                    id SERIAL PRIMARY KEY,
+                    chat_id BIGINT NOT NULL,
+                    user_id BIGINT NOT NULL,
+                    nick VARCHAR(100) NOT NULL,
+                    set_by BIGINT NOT NULL,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(chat_id, user_id)
+                )
+            """)
+            
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_nicks_chat_user 
+                ON nicks(chat_id, user_id)
+            """)
+        
+        print("✅ База данных подключена")
+    except Exception as e:
+        print(f"❌ Ошибка подключения к БД: {e}")
+        exit(1)
+
+
+async def set_nick(chat_id: int, user_id: int, nick: str, set_by: int):
+    """Установить ник"""
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO nicks (chat_id, user_id, nick, set_by)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (chat_id, user_id)
+            DO UPDATE SET nick = $3, set_by = $4, created_at = NOW()
+        """, chat_id, user_id, nick, set_by)
+
+
+async def remove_nick(chat_id: int, user_id: int) -> str | None:
+    """Удалить ник. Возвращает старый ник или None"""
+    async with db_pool.acquire() as conn:
+        old_nick = await conn.fetchval(
+            "DELETE FROM nicks WHERE chat_id = $1 AND user_id = $2 RETURNING nick",
+            chat_id, user_id
+        )
+        return old_nick
+
+
+async def get_nick(chat_id: int, user_id: int) -> str | None:
+    """Получить ник пользователя"""
+    async with db_pool.acquire() as conn:
+        nick = await conn.fetchval(
+            "SELECT nick FROM nicks WHERE chat_id = $1 AND user_id = $2",
+            chat_id, user_id
+        )
+        return nick
+
+
+async def get_all_nicks(chat_id: int) -> list:
+    """Получить все ники в чате"""
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT user_id, nick FROM nicks WHERE chat_id = $1 ORDER BY nick",
+            chat_id
+        )
+        return rows
+
+
+# ====== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ======
 
 async def is_admin(api: API, chat_id: int, user_id: int) -> bool:
-    """Проверяет, является ли пользователь администратором беседы"""
+    """Проверка прав администратора"""
+    if user_id in ADMIN_IDS:
+        return True
     try:
         members = await api.messages.get_conversation_members(
             peer_id=2000000000 + chat_id
@@ -70,226 +128,315 @@ async def is_admin(api: API, chat_id: int, user_id: int) -> bool:
 
 
 async def check_admin(message: Message, chat_id: int) -> bool:
-    """Проверяет права и отправляет сообщение об ошибке"""
-    if message.from_id in ADMIN_IDS:
-        return True
-    
+    """Проверка прав с выводом ошибки"""
     if await is_admin(bot.api, chat_id, message.from_id):
         return True
-    
     await message.answer("❌ У вас нет прав администратора")
     return False
 
 
-# ========== КОМАНДЫ ==========
+def get_chat_id(message: Message) -> int:
+    """Получить ID чата"""
+    return message.peer_id - 2000000000
 
-@bot.on.message(command="кик")
+
+async def get_user_name(api: API, user_id: int) -> str:
+    """Получить имя пользователя"""
+    try:
+        user_info = await api.users.get(user_ids=[user_id])
+        if user_info:
+            return f"{user_info[0].first_name} {user_info[0].last_name}"
+    except:
+        pass
+    return f"id{user_id}"
+
+
+# ====== КОМАНДЫ ======
+
+@bot.on.message(command=["help", "хелп", "помощь", "команды", "start", "начать"])
+async def help_handler(message: Message):
+    """Список всех команд"""
+    help_text = """
+🤖 **Админ-бот | Список команд**
+
+⛔ **/kick** — кикнуть (ответом)
+🔨 **/ban** — забанить (ответом)
+🔓 **/unban @user** — разбанить
+
+✏️ **Никнеймы:**
+📛 **/snick Ник** — установить ник (ответом)
+🗑️ **/rnick** — удалить ник (ответом)
+🔍 **/gnick** — узнать ник (ответом или /gnick @user)
+📋 **/nicks** — список всех ников в чате
+
+📌 Команды для администраторов беседы
+    """
+    await message.answer(help_text)
+
+
+# ====== KICK ======
+
+@bot.on.message(command="kick")
 async def kick_handler(message: Message):
-    """Кикнуть пользователя из беседы"""
-    chat_id = message.peer_id - 2000000000
+    """Кикнуть пользователя"""
+    chat_id = get_chat_id(message)
     
     if not await check_admin(message, chat_id):
         return
     
     if message.peer_id < 2000000000:
-        return await message.answer("❌ Эта команда работает только в беседе")
+        return await message.answer("❌ Команда только для бесед")
     
     if not message.reply_message:
-        return await message.answer("❌ Ответьте на сообщение пользователя, которого хотите кикнуть")
+        return await message.answer("❌ Ответьте на сообщение пользователя")
     
     target_id = message.reply_message.from_id
     
     if target_id == message.from_id:
-        return await message.answer("❌ Вы не можете кикнуть самого себя")
+        return await message.answer("❌ Нельзя кикнуть самого себя")
     
     try:
         await bot.api.messages.remove_chat_user(
             chat_id=chat_id,
             member_id=target_id
         )
-        await message.answer("✅ Пользователь исключен из беседы")
+        await message.answer("✅ Пользователь кикнут")
     except Exception as e:
-        await message.answer(f"❌ Ошибка при кике: {str(e)}")
+        await message.answer(f"❌ Ошибка: {str(e)}")
 
 
-@bot.on.message(command="бан")
+# ====== BAN ======
+
+@bot.on.message(command="ban")
 async def ban_handler(message: Message):
-    """Забанить пользователя (кик + бан в сообществе)"""
-    chat_id = message.peer_id - 2000000000
+    """Забанить пользователя"""
+    chat_id = get_chat_id(message)
     
     if not await check_admin(message, chat_id):
         return
     
     if message.peer_id < 2000000000:
-        return await message.answer("❌ Эта команда работает только в беседе")
+        return await message.answer("❌ Команда только для бесед")
     
     if not message.reply_message:
-        return await message.answer("❌ Ответьте на сообщение пользователя, которого хотите забанить")
+        return await message.answer("❌ Ответьте на сообщение пользователя")
     
     target_id = message.reply_message.from_id
     
     if target_id == message.from_id:
-        return await message.answer("❌ Вы не можете забанить самого себя")
+        return await message.answer("❌ Нельзя забанить самого себя")
     
     try:
         await bot.api.messages.remove_chat_user(
             chat_id=chat_id,
             member_id=target_id
         )
-        
         await bot.api.groups.ban(
             group_id=message.group_id,
             owner_id=target_id
         )
-        
-        await message.answer(
-            f"✅ Пользователь заблокирован в сообществе\n"
-            f"Чтобы разбанить: /разбан @id{target_id}"
-        )
+        await message.answer(f"✅ Пользователь забанен\nРазбанить: /unban @id{target_id}")
     except Exception as e:
-        await message.answer(f"❌ Ошибка при бане: {str(e)}")
+        await message.answer(f"❌ Ошибка: {str(e)}")
 
 
-@bot.on.message(command="разбан")
+# ====== UNBAN ======
+
+@bot.on.message(command="unban")
 async def unban_handler(message: Message):
-    """Разбанить пользователя в сообществе"""
-    chat_id = message.peer_id - 2000000000
+    """Разбанить пользователя"""
+    chat_id = get_chat_id(message)
     
     if not await check_admin(message, chat_id):
         return
     
     args = message.text.split()
-    
     if len(args) < 2:
-        return await message.answer(
-            "❌ Укажите пользователя:\n"
-            "/разбан @user\n"
-            "/разбан vk.com/id123\n"
-            "/разбан 123456789"
-        )
+        return await message.answer("❌ Укажите: /unban @user или /unban ID")
     
     target_text = args[1]
-    target_id = await get_user_id(bot.api, target_text)
+    target_id = 0
+    
+    if target_text.isdigit():
+        target_id = int(target_text)
+    else:
+        match = re.search(r'\[id(\d+)\|', target_text)
+        if match:
+            target_id = int(match.group(1))
+        else:
+            match = re.search(r'vk\.com/id(\d+)', target_text)
+            if match:
+                target_id = int(match.group(1))
     
     if not target_id:
-        return await message.answer(
-            "❌ Пользователь не найден. Укажите:\n"
-            "• Ссылку на профиль\n"
-            "• Упоминание\n"
-            "• ID пользователя"
-        )
+        return await message.answer("❌ Пользователь не найден")
     
     try:
         await bot.api.groups.unban(
             group_id=message.group_id,
             owner_id=target_id
         )
-        await message.answer("✅ Пользователь разбанен в сообществе")
+        await message.answer("✅ Пользователь разбанен")
     except Exception as e:
-        error_msg = str(e)
-        if "not found" in error_msg.lower():
-            await message.answer("❌ Пользователь не забанен или уже разбанен")
-        else:
-            await message.answer(f"❌ Ошибка при разбане: {error_msg}")
+        await message.answer(f"❌ Ошибка: {str(e)}")
 
 
-@bot.on.message(command="ник")
-async def nick_handler(message: Message):
-    """Установить никнейм пользователю в беседе"""
-    chat_id = message.peer_id - 2000000000
+# ====== SNICK (установить ник) ======
+
+@bot.on.message(command="snick")
+async def snick_handler(message: Message):
+    """Установить никнейм"""
+    chat_id = get_chat_id(message)
     
     if not await check_admin(message, chat_id):
         return
     
     if not message.reply_message:
-        return await message.answer("❌ Ответьте на сообщение пользователя, которому хотите дать ник")
+        return await message.answer("❌ Ответьте на сообщение пользователя")
     
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
-        return await message.answer(
-            "❌ Укажите никнейм:\n"
-            "/ник НовыйНик"
-        )
+        return await message.answer("❌ Укажите ник: /snick НовыйНик")
     
     new_nick = args[1].strip()
     
-    if len(new_nick) > 50:
-        return await message.answer("❌ Никнейм должен быть короче 50 символов")
+    if len(new_nick) > 100:
+        return await message.answer("❌ Ник должен быть короче 100 символов")
     
     if len(new_nick) < 2:
-        return await message.answer("❌ Никнейм должен быть длиннее 2 символов")
+        return await message.answer("❌ Ник должен быть длиннее 2 символов")
     
     if re.search(r'[<>{}()\[\]\\\/]', new_nick):
-        return await message.answer("❌ Никнейм содержит запрещенные символы")
+        return await message.answer("❌ Ник содержит запрещённые символы")
     
     target_id = message.reply_message.from_id
+    target_name = await get_user_name(bot.api, target_id)
     
-    try:
-        user_info = await bot.api.users.get(user_ids=[target_id])
-        if user_info:
-            real_name = f"{user_info[0].first_name} {user_info[0].last_name}"
-        else:
-            real_name = f"id{target_id}"
-        
-        await message.answer(
-            f"✅ Пользователю {real_name} установлен никнейм\n"
-            f"📛 Новый ник: {new_nick}"
-        )
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {str(e)}")
+    await set_nick(chat_id, target_id, new_nick, message.from_id)
+    
+    await message.answer(f"✅ {target_name} теперь **{new_nick}**")
 
 
-@bot.on.message(command=["команды", "help", "начать", "start"])
-async def help_handler(message: Message):
-    """Показать список всех команд"""
-    help_text = """
-🤖 **Админ-бот | Список команд**
+# ====== RNICK (удалить ник) ======
 
-⚡ **/кик** — исключить из беседы
-⛔ **/бан** — забанить в сообществе
-🔓 **/разбан @user** — разблокировать
-✏️ **/ник Имя** — установить ник
+@bot.on.message(command="rnick")
+async def rnick_handler(message: Message):
+    """Удалить никнейм"""
+    chat_id = get_chat_id(message)
+    
+    if not await check_admin(message, chat_id):
+        return
+    
+    if not message.reply_message:
+        return await message.answer("❌ Ответьте на сообщение пользователя")
+    
+    target_id = message.reply_message.from_id
+    target_name = await get_user_name(bot.api, target_id)
+    
+    old_nick = await remove_nick(chat_id, target_id)
+    
+    if old_nick:
+        await message.answer(f"🗑️ У {target_name} удалён ник **{old_nick}**")
+    else:
+        await message.answer(f"❌ У {target_name} нет ника")
 
-📋 **Доступные форматы:**
-• `/разбан @durov`
-• `/разбан vk.com/id1`
-• `/разбан 1`
 
-📌 **Команды работают:**
-• Только в беседах
-• Для администраторов чата
-• Отвечать на сообщение цели
+# ====== GNICK (узнать ник) ======
 
-👨‍💻 **GitHub:** https://github.com/your/vk-admin-bot
-    """
-    await message.answer(help_text)
+@bot.on.message(command="gnick")
+async def gnick_handler(message: Message):
+    """Узнать ник пользователя"""
+    chat_id = get_chat_id(message)
+    target_id = 0
+    
+    if message.reply_message:
+        target_id = message.reply_message.from_id
+    else:
+        args = message.text.split()
+        if len(args) >= 2:
+            target_text = args[1]
+            
+            if target_text.isdigit():
+                target_id = int(target_text)
+            else:
+                match = re.search(r'\[id(\d+)\|', target_text)
+                if match:
+                    target_id = int(match.group(1))
+                else:
+                    match = re.search(r'vk\.com/id(\d+)', target_text)
+                    if match:
+                        target_id = int(match.group(1))
+    
+    if not target_id:
+        return await message.answer("❌ Ответьте на сообщение или укажите: /gnick @user")
+    
+    target_name = await get_user_name(bot.api, target_id)
+    nick = await get_nick(chat_id, target_id)
+    
+    if nick:
+        await message.answer(f"🔍 {target_name} — **{nick}**")
+    else:
+        await message.answer(f"🔍 У {target_name} нет ника")
 
+
+# ====== NICKS (список всех ников) ======
+
+@bot.on.message(command="nicks")
+async def nicks_handler(message: Message):
+    """Показать все ники в чате"""
+    chat_id = get_chat_id(message)
+    
+    all_nicks = await get_all_nicks(chat_id)
+    
+    if not all_nicks:
+        return await message.answer("📋 В этом чате нет ников")
+    
+    text = "📋 **Ники в этом чате:**\n\n"
+    for row in all_nicks:
+        user_name = await get_user_name(bot.api, row['user_id'])
+        text += f"• {user_name} — **{row['nick']}**\n"
+    
+    await message.answer(text)
+
+
+# ====== ОБЫЧНЫЕ СООБЩЕНИЯ ======
 
 @bot.on.message()
 async def any_message(message: Message):
-    """Отвечает на любое сообщение"""
+    """Ответ в личных сообщениях"""
     if message.peer_id < 2000000000:
         await message.answer(
-            "👋 Привет! Я бот-администратор.\n"
+            "👋 Привет! Я админ-бот.\n"
             "Добавь меня в беседу и дай права администратора.\n\n"
-            "Напиши /команды для списка команд"
+            "Напиши /help для списка команд"
         )
 
 
-# ========== ЗАПУСК ==========
+# ====== ЗАПУСК ======
 
-if __name__ == "__main__":
+async def main():
+    """Главная функция"""
     print("=" * 50)
-    print("🤖 Бот-администратор ВКонтакте")
-    print("🐍 Python 3.11+")
+    print("🤖 Админ-бот ВКонтакте")
+    print("🗄️ База данных: PostgreSQL")
     print("=" * 50)
-    print("✅ Бот запущен и готов к работе!")
-    print("📋 Команды: /кик, /бан, /разбан, /ник, /команды")
+    
+    await init_db()
+    
+    print("📋 Команды: /help, /kick, /ban, /unban")
+    print("📛 Ники: /snick, /rnick, /gnick, /nicks")
     print("-" * 50)
+    print("✅ Бот запущен!")
     
     try:
-        bot.run_forever()
+        await bot.run_polling()
     except KeyboardInterrupt:
         print("\n👋 Бот остановлен")
-    except Exception as e:
-        print(f"❌ Критическая ошибка: {e}")
+    finally:
+        if db_pool:
+            await db_pool.close()
+            print("🔌 База данных отключена")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
