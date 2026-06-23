@@ -1,7 +1,7 @@
 """
 Бот-администратор для ВКонтакте
 Python 3.11+
-Функции: кик, бан, разбан, управление никами
+Функции: кик, бан, разбан, управление никами, админами
 База данных: PostgreSQL
 """
 
@@ -27,7 +27,10 @@ DATABASE_URL: str | None = os.environ.get("DATABASE_URL")
 if not DATABASE_URL:
     DATABASE_URL = "postgresql://bothost_db_c28f080200a2:VKQO5ZU113LDy3icJRRwwndTgaBNNp2KALyme49zAzU@node1.pghost.ru:15807/bothost_db_c28f080200a2"
 
-ADMIN_IDS: list[int] = []
+# Владельцы бота (полный доступ ко всему)
+OWNER_IDS: list[int] = [
+    724970995,  # muf1337
+]
 
 print("✅ Конфигурация загружена!")
 
@@ -42,6 +45,7 @@ async def init_db():
     try:
         db_pool = await asyncpg.create_pool(DATABASE_URL)
         async with db_pool.acquire() as conn:
+            # Таблица ников
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS nicks (
                     chat_id BIGINT NOT NULL,
@@ -52,11 +56,24 @@ async def init_db():
                     PRIMARY KEY (chat_id, user_id)
                 )
             """)
+            
+            # Таблица админов бота
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS bot_admins (
+                    chat_id BIGINT NOT NULL,
+                    user_id BIGINT NOT NULL,
+                    added_by BIGINT NOT NULL,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    PRIMARY KEY (chat_id, user_id)
+                )
+            """)
         print("✅ База данных готова")
     except Exception as e:
         print(f"❌ Ошибка БД: {e}")
         exit(1)
 
+
+# ====== НИКИ ======
 
 async def set_nick(chat_id: int, user_id: int, nick: str, set_by: int):
     async with db_pool.acquire() as conn:
@@ -95,11 +112,55 @@ async def get_all_nicks(chat_id: int):
         return rows
 
 
+# ====== АДМИНЫ ======
+
+async def add_admin(chat_id: int, user_id: int, added_by: int):
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO bot_admins (chat_id, user_id, added_by, created_at)
+            VALUES ($1, $2, $3, NOW())
+            ON CONFLICT (chat_id, user_id) DO NOTHING
+        """, chat_id, user_id, added_by)
+
+
+async def remove_admin(chat_id: int, user_id: int):
+    async with db_pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM bot_admins WHERE chat_id = $1 AND user_id = $2",
+            chat_id, user_id
+        )
+        return result != "DELETE 0"
+
+
+async def is_bot_admin(chat_id: int, user_id: int) -> bool:
+    if user_id in OWNER_IDS:
+        return True
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT 1 FROM bot_admins WHERE chat_id = $1 AND user_id = $2",
+            chat_id, user_id
+        )
+        return row is not None
+
+
+async def get_all_admins(chat_id: int):
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT user_id, added_by, created_at FROM bot_admins WHERE chat_id = $1 ORDER BY created_at",
+            chat_id
+        )
+        return rows
+
+
 # ====== ВСПОМОГАТЕЛЬНЫЕ ======
 
 async def is_admin(api: API, chat_id: int, user_id: int) -> bool:
-    if user_id in ADMIN_IDS:
+    if user_id in OWNER_IDS:
         return True
+    
+    if await is_bot_admin(chat_id, user_id):
+        return True
+    
     try:
         members = await api.messages.get_conversation_members(
             peer_id=2000000000 + chat_id
@@ -115,7 +176,14 @@ async def is_admin(api: API, chat_id: int, user_id: int) -> bool:
 async def check_admin(message: Message, chat_id: int) -> bool:
     if await is_admin(bot.api, chat_id, message.from_id):
         return True
-    await message.answer("❌ У вас нет прав администратора")
+    await message.answer("❌ У вас нет прав")
+    return False
+
+
+async def check_owner(message: Message) -> bool:
+    if message.from_id in OWNER_IDS:
+        return True
+    await message.answer("❌ Только владелец бота может использовать эту команду")
     return False
 
 
@@ -134,6 +202,8 @@ async def get_user_name(api: API, user_id: int) -> str:
 
 
 def extract_id(text: str) -> int:
+    text = text.strip()
+    
     if text.isdigit():
         return int(text)
     
@@ -145,6 +215,33 @@ def extract_id(text: str) -> int:
     if match:
         return int(match.group(1))
     
+    match = re.search(r'vk\.com/([a-zA-Z0-9_.]+)', text)
+    if match:
+        return 0
+    
+    match = re.search(r'@([a-zA-Z0-9_.]+)', text)
+    if match:
+        return 0
+    
+    return 0
+
+
+async def resolve_user(api: API, text: str) -> int:
+    uid = extract_id(text)
+    if uid > 0:
+        return uid
+    
+    match = re.search(r'(?:vk\.com/|@)([a-zA-Z0-9_.]+)', text)
+    if match:
+        screen_name = match.group(1)
+        if screen_name not in ['id', 'club', 'public']:
+            try:
+                result = await api.utils.resolve_screen_name(screen_name=screen_name)
+                if result and result.type == 'user':
+                    return result.object_id
+            except:
+                pass
+    
     return 0
 
 
@@ -153,29 +250,44 @@ def extract_id(text: str) -> int:
 @bot.on.message(text=["/help"])
 async def help_handler(message: Message):
     await message.answer("""
-🤖 Команды:
+🤖 Команды бота:
 
-/kick — кикнуть (ответом)
-/ban — забанить (ответом)
+👮 Управление:
+/kick — кикнуть (ответом или /kick @user)
+/ban — забанить (ответом или /ban @user)
 /unban @user — разбанить
+
+📛 Ники:
 /snick Ник — установить ник (ответом)
 /rnick — удалить ник (ответом)
 /gnick — узнать ник (ответом или /gnick @user)
-/nicks — список ников в чате
+/nlist — список всех ников в чате
+
+👑 Админы (владелец):
+/addadmin @user — дать доступ к командам
+/deladmin @user — забрать доступ
+/adminlist — список админов бота
 """)
 
 
-@bot.on.message(text=["/kick"])
-async def kick_handler(message: Message):
+# ====== KICK ======
+
+@bot.on.message(text=["/kick", "/kick <user>"])
+async def kick_handler(message: Message, user: str = None):
     chat_id = get_chat_id(message)
     
     if not await check_admin(message, chat_id):
         return
     
-    if not message.reply_message:
-        return await message.answer("❌ Ответьте на сообщение пользователя")
+    target_id = 0
     
-    target_id = message.reply_message.from_id
+    if message.reply_message:
+        target_id = message.reply_message.from_id
+    elif user:
+        target_id = await resolve_user(bot.api, user)
+    
+    if not target_id:
+        return await message.answer("❌ Ответьте на сообщение или укажите /kick @user")
     
     if target_id == message.from_id:
         return await message.answer("❌ Нельзя кикнуть самого себя")
@@ -185,25 +297,35 @@ async def kick_handler(message: Message):
             chat_id=chat_id,
             member_id=target_id
         )
-        await message.answer("✅ Пользователь кикнут")
+        target_name = await get_user_name(bot.api, target_id)
+        await message.answer(f"✅ {target_name} кикнут")
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}")
 
 
-@bot.on.message(text=["/ban"])
-async def ban_handler(message: Message):
+# ====== BAN ======
+
+@bot.on.message(text=["/ban", "/ban <user>"])
+async def ban_handler(message: Message, user: str = None):
     chat_id = get_chat_id(message)
     
     if not await check_admin(message, chat_id):
         return
     
-    if not message.reply_message:
-        return await message.answer("❌ Ответьте на сообщение пользователя")
+    target_id = 0
     
-    target_id = message.reply_message.from_id
+    if message.reply_message:
+        target_id = message.reply_message.from_id
+    elif user:
+        target_id = await resolve_user(bot.api, user)
+    
+    if not target_id:
+        return await message.answer("❌ Ответьте на сообщение или укажите /ban @user")
     
     if target_id == message.from_id:
         return await message.answer("❌ Нельзя забанить самого себя")
+    
+    target_name = await get_user_name(bot.api, target_id)
     
     try:
         await bot.api.messages.remove_chat_user(
@@ -214,10 +336,12 @@ async def ban_handler(message: Message):
             group_id=message.group_id,
             owner_id=target_id
         )
-        await message.answer(f"✅ Пользователь забанен\n/unban @id{target_id}")
+        await message.answer(f"✅ {target_name} забанен\n/unban @id{target_id}")
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}")
 
+
+# ====== UNBAN ======
 
 @bot.on.message(text=["/unban", "/unban <user>"])
 async def unban_handler(message: Message, user: str = None):
@@ -227,22 +351,26 @@ async def unban_handler(message: Message, user: str = None):
         return
     
     if not user:
-        return await message.answer("❌ Укажите: /unban @user или /unban ID")
+        return await message.answer("❌ Укажите: /unban @user или /unban ссылка")
     
-    target_id = extract_id(user)
+    target_id = await resolve_user(bot.api, user)
     
     if not target_id:
         return await message.answer("❌ Пользователь не найден")
+    
+    target_name = await get_user_name(bot.api, target_id)
     
     try:
         await bot.api.groups.unban(
             group_id=message.group_id,
             owner_id=target_id
         )
-        await message.answer("✅ Пользователь разбанен")
+        await message.answer(f"✅ {target_name} разбанен")
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}")
 
+
+# ====== SNICK ======
 
 @bot.on.message(text=["/snick", "/snick <nick>"])
 async def snick_handler(message: Message, nick: str = None):
@@ -275,6 +403,8 @@ async def snick_handler(message: Message, nick: str = None):
     await message.answer(f"✅ {target_name} теперь {new_nick}")
 
 
+# ====== RNICK ======
+
 @bot.on.message(text=["/rnick"])
 async def rnick_handler(message: Message):
     chat_id = get_chat_id(message)
@@ -296,6 +426,8 @@ async def rnick_handler(message: Message):
         await message.answer(f"❌ У {target_name} нет ника")
 
 
+# ====== GNICK ======
+
 @bot.on.message(text=["/gnick", "/gnick <user>"])
 async def gnick_handler(message: Message, user: str = None):
     chat_id = get_chat_id(message)
@@ -304,7 +436,7 @@ async def gnick_handler(message: Message, user: str = None):
     if message.reply_message:
         target_id = message.reply_message.from_id
     elif user:
-        target_id = extract_id(user)
+        target_id = await resolve_user(bot.api, user)
     
     if not target_id:
         return await message.answer("❌ Ответьте на сообщение или /gnick @user")
@@ -318,8 +450,10 @@ async def gnick_handler(message: Message, user: str = None):
         await message.answer(f"🔍 У {target_name} нет ника")
 
 
-@bot.on.message(text=["/nicks"])
-async def nicks_handler(message: Message):
+# ====== NLIST ======
+
+@bot.on.message(text=["/nlist"])
+async def nlist_handler(message: Message):
     chat_id = get_chat_id(message)
     
     all_nicks = await get_all_nicks(chat_id)
@@ -328,9 +462,91 @@ async def nicks_handler(message: Message):
         return await message.answer("📋 В этом чате нет ников")
     
     text = "📋 Ники в этом чате:\n\n"
-    for row in all_nicks:
+    for i, row in enumerate(all_nicks, 1):
         user_name = await get_user_name(bot.api, row['user_id'])
-        text += f"• {user_name} — {row['nick']}\n"
+        text += f"{i}. {user_name} — {row['nick']}\n"
+    
+    await message.answer(text)
+
+
+# ====== ADDADMIN ======
+
+@bot.on.message(text=["/addadmin", "/addadmin <user>"])
+async def addadmin_handler(message: Message, user: str = None):
+    chat_id = get_chat_id(message)
+    
+    if not await check_owner(message):
+        return
+    
+    target_id = 0
+    
+    if message.reply_message:
+        target_id = message.reply_message.from_id
+    elif user:
+        target_id = await resolve_user(bot.api, user)
+    
+    if not target_id:
+        return await message.answer("❌ Ответьте на сообщение или /addadmin @user")
+    
+    target_name = await get_user_name(bot.api, target_id)
+    
+    await add_admin(chat_id, target_id, message.from_id)
+    await message.answer(f"✅ {target_name} теперь админ бота")
+
+
+# ====== DELADMIN ======
+
+@bot.on.message(text=["/deladmin", "/deladmin <user>"])
+async def deladmin_handler(message: Message, user: str = None):
+    chat_id = get_chat_id(message)
+    
+    if not await check_owner(message):
+        return
+    
+    target_id = 0
+    
+    if message.reply_message:
+        target_id = message.reply_message.from_id
+    elif user:
+        target_id = await resolve_user(bot.api, user)
+    
+    if not target_id:
+        return await message.answer("❌ Ответьте на сообщение или /deladmin @user")
+    
+    if target_id in OWNER_IDS:
+        return await message.answer("❌ Нельзя удалить владельца")
+    
+    target_name = await get_user_name(bot.api, target_id)
+    
+    removed = await remove_admin(chat_id, target_id)
+    
+    if removed:
+        await message.answer(f"✅ {target_name} больше не админ бота")
+    else:
+        await message.answer(f"❌ {target_name} не был админом")
+
+
+# ====== ADMINLIST ======
+
+@bot.on.message(text=["/adminlist"])
+async def adminlist_handler(message: Message):
+    chat_id = get_chat_id(message)
+    
+    if not await check_admin(message, chat_id):
+        return
+    
+    admins = await get_all_admins(chat_id)
+    
+    text = "👑 Админы бота:\n\n"
+    
+    for owner_id in OWNER_IDS:
+        owner_name = await get_user_name(bot.api, owner_id)
+        text += f"• {owner_name} — 👑 владелец\n"
+    
+    for row in admins:
+        admin_name = await get_user_name(bot.api, row['user_id'])
+        added_by_name = await get_user_name(bot.api, row['added_by'])
+        text += f"• {admin_name} — назначил {added_by_name}\n"
     
     await message.answer(text)
 
@@ -346,7 +562,8 @@ async def main():
     await init_db()
     
     print("📋 Команды: /help, /kick, /ban, /unban")
-    print("📛 Ники: /snick, /rnick, /gnick, /nicks")
+    print("📛 Ники: /snick, /rnick, /gnick, /nlist")
+    print("👑 Админы: /addadmin, /deladmin, /adminlist")
     print("-" * 50)
     print("✅ Бот запущен!")
     
