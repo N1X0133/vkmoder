@@ -6,7 +6,8 @@ Python 3.11+
 
 import os
 import re
-from vkbottle import Bot, Message
+from vkbottle import Bot
+from vkbottle.bot import Message
 from vkbottle.api import API
 
 # Токен из переменной окружения хостинга
@@ -105,7 +106,7 @@ async def kick_handler(message: Message):
             chat_id=chat_id,
             member_id=target_id
         )
-        await message.answer(f"✅ Пользователь исключен из беседы")
+        await message.answer("✅ Пользователь исключен из беседы")
     except Exception as e:
         await message.answer(f"❌ Ошибка при кике: {str(e)}")
 
@@ -182,7 +183,7 @@ async def unban_handler(message: Message):
             group_id=message.group_id,
             owner_id=target_id
         )
-        await message.answer(f"✅ Пользователь разбанен в сообществе")
+        await message.answer("✅ Пользователь разбанен в сообществе")
     except Exception as e:
         error_msg = str(e)
         if "not found" in error_msg.lower():
