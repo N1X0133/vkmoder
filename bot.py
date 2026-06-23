@@ -27,7 +27,7 @@ DATABASE_URL: str | None = os.environ.get("DATABASE_URL")
 if not DATABASE_URL:
     DATABASE_URL = "postgresql://bothost_db_c28f080200a2:VKQO5ZU113LDy3icJRRwwndTgaBNNp2KALyme49zAzU@node1.pghost.ru:15807/bothost_db_c28f080200a2"
 
-# Владельцы бота (полный доступ ко всему)
+# Владельцы бота
 OWNER_IDS: list[int] = [
     724970995,  # muf1337
 ]
@@ -199,25 +199,26 @@ async def get_user_name(api: API, user_id: int) -> str:
     return f"id{user_id}"
 
 
+def user_link(user_id: int, name: str) -> str:
+    """Создать кликабельную ссылку на пользователя"""
+    return f"@id{user_id}({name})"
+
+
 async def resolve_user(api: API, text: str) -> int:
     """Получить ID из упоминания, ссылки или ID"""
     text = text.strip()
     
-    # Просто число
     if text.isdigit():
         return int(text)
     
-    # Упоминание [id123|@user]
     match = re.search(r'\[id(\d+)\|', text)
     if match:
         return int(match.group(1))
     
-    # Ссылка vk.com/id123
     match = re.search(r'vk\.com/id(\d+)', text)
     if match:
         return int(match.group(1))
     
-    # Ссылка vk.com/username или @username
     match = re.search(r'(?:vk\.com/|@)([a-zA-Z0-9_.]+)', text)
     if match:
         screen_name = match.group(1)
@@ -233,11 +234,10 @@ async def resolve_user(api: API, text: str) -> int:
 
 
 def get_target(message: Message, user_arg: str = None) -> int:
-    """Получить ID цели: из ответа или из аргумента"""
     if message.reply_message:
         return message.reply_message.from_id
     elif user_arg:
-        return 0  # Будет разрешено через API
+        return 0
     return 0
 
 
@@ -264,8 +264,7 @@ async def help_handler(message: Message):
 /deladmin @user — забрать доступ
 /adminlist — список админов
 
-💡 Можно использовать:
-@user, vk.com/user, vk.com/id123, ID
+💡 Можно: @user, vk.com/user, vk.com/id123, ID
 """)
 
 
@@ -370,9 +369,7 @@ async def snick_handler(message: Message, user: str = None, nick: str = None):
     if not target_id:
         return await message.answer("❌ Укажите пользователя: /snick @user Ник")
     
-    # Если ник не указан отдельно, проверяем текст после пользователя
     if not nick:
-        # Убираем команду и пользователя из текста
         parts = message.text.split()
         if len(parts) >= 3:
             nick = " ".join(parts[2:])
@@ -441,12 +438,12 @@ async def gnick_handler(message: Message, user: str = None):
     nick = await get_nick(chat_id, target_id)
     
     if nick:
-        await message.answer(f"🔍 {target_name} — {nick}")
+        await message.answer(f"🔍 {user_link(target_id, target_name)} — {nick}")
     else:
-        await message.answer(f"🔍 У {target_name} нет ника")
+        await message.answer(f"🔍 У {user_link(target_id, target_name)} нет ника")
 
 
-# ====== NLIST ======
+# ====== NLIST (с кликабельными именами) ======
 
 @bot.on.message(text=["/nlist"])
 async def nlist_handler(message: Message):
@@ -457,12 +454,13 @@ async def nlist_handler(message: Message):
     if not all_nicks:
         return await message.answer("📋 В этом чате нет ников")
     
-    text = "📋 Ники в этом чате:\n\n"
+    text = "📋 Список пользователей с ником:\n\n"
     for i, row in enumerate(all_nicks, 1):
         user_name = await get_user_name(bot.api, row['user_id'])
-        text += f"{i}. {user_name} — {row['nick']}\n"
+        link = user_link(row['user_id'], user_name)
+        text += f"{i}. {link} — {row['nick']}\n"
     
-    await message.answer(text)
+    await message.answer(text, disable_mentions=0)
 
 
 # ====== ADDADMIN ======
@@ -533,14 +531,14 @@ async def adminlist_handler(message: Message):
     
     for owner_id in OWNER_IDS:
         owner_name = await get_user_name(bot.api, owner_id)
-        text += f"• {owner_name} — 👑 владелец\n"
+        text += f"• {user_link(owner_id, owner_name)} — 👑 владелец\n"
     
     for row in admins:
         admin_name = await get_user_name(bot.api, row['user_id'])
         added_by_name = await get_user_name(bot.api, row['added_by'])
-        text += f"• {admin_name} — назначил {added_by_name}\n"
+        text += f"• {user_link(row['user_id'], admin_name)} — назначил {user_link(row['added_by'], added_by_name)}\n"
     
-    await message.answer(text)
+    await message.answer(text, disable_mentions=0)
 
 
 # ====== ЗАПУСК ======
