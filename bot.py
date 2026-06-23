@@ -200,7 +200,7 @@ async def get_user_name(api: API, user_id: int) -> str:
 
 
 def user_link(user_id: int, name: str) -> str:
-    """Создать кликабельную ссылку на пользователя"""
+    """Создать кликабельную ссылку"""
     return f"@id{user_id}({name})"
 
 
@@ -290,8 +290,14 @@ async def kick_handler(message: Message, user: str = None):
     
     try:
         await bot.api.messages.remove_chat_user(chat_id=chat_id, member_id=target_id)
+        
+        admin_name = await get_user_name(bot.api, message.from_id)
         target_name = await get_user_name(bot.api, target_id)
-        await message.answer(f"✅ {target_name} кикнут")
+        
+        await message.answer(
+            f"✅ {user_link(message.from_id, admin_name)} кикнул {user_link(target_id, target_name)}.",
+            disable_mentions=0
+        )
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}")
 
@@ -316,12 +322,17 @@ async def ban_handler(message: Message, user: str = None):
     if target_id == message.from_id:
         return await message.answer("❌ Нельзя забанить самого себя")
     
-    target_name = await get_user_name(bot.api, target_id)
-    
     try:
         await bot.api.messages.remove_chat_user(chat_id=chat_id, member_id=target_id)
         await bot.api.groups.ban(group_id=message.group_id, owner_id=target_id)
-        await message.answer(f"✅ {target_name} забанен")
+        
+        admin_name = await get_user_name(bot.api, message.from_id)
+        target_name = await get_user_name(bot.api, target_id)
+        
+        await message.answer(
+            f"✅ {user_link(message.from_id, admin_name)} забанил {user_link(target_id, target_name)}.",
+            disable_mentions=0
+        )
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}")
 
@@ -343,11 +354,16 @@ async def unban_handler(message: Message, user: str = None):
     if not target_id:
         return await message.answer("❌ Пользователь не найден")
     
-    target_name = await get_user_name(bot.api, target_id)
-    
     try:
         await bot.api.groups.unban(group_id=message.group_id, owner_id=target_id)
-        await message.answer(f"✅ {target_name} разбанен")
+        
+        admin_name = await get_user_name(bot.api, message.from_id)
+        target_name = await get_user_name(bot.api, target_id)
+        
+        await message.answer(
+            f"✅ {user_link(message.from_id, admin_name)} разбанил {user_link(target_id, target_name)}.",
+            disable_mentions=0
+        )
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}")
 
@@ -389,9 +405,14 @@ async def snick_handler(message: Message, user: str = None, nick: str = None):
         return await message.answer("❌ Ник содержит запрещённые символы")
     
     target_name = await get_user_name(bot.api, target_id)
+    admin_name = await get_user_name(bot.api, message.from_id)
     
     await set_nick(chat_id, target_id, new_nick, message.from_id)
-    await message.answer(f"✅ {target_name} теперь {new_nick}")
+    
+    await message.answer(
+        f"✅ {user_link(message.from_id, admin_name)} поставил никнейм '{new_nick}' {user_link(target_id, target_name)}.",
+        disable_mentions=0
+    )
 
 
 # ====== RNICK ======
@@ -411,14 +432,21 @@ async def rnick_handler(message: Message, user: str = None):
     if not target_id:
         return await message.answer("❌ Укажите пользователя: /rnick @user")
     
+    admin_name = await get_user_name(bot.api, message.from_id)
     target_name = await get_user_name(bot.api, target_id)
     
     old_nick = await remove_nick(chat_id, target_id)
     
     if old_nick:
-        await message.answer(f"🗑️ У {target_name} удалён ник {old_nick}")
+        await message.answer(
+            f"🗑️ {user_link(message.from_id, admin_name)} удалил никнейм {user_link(target_id, target_name)}.",
+            disable_mentions=0
+        )
     else:
-        await message.answer(f"❌ У {target_name} нет ника")
+        await message.answer(
+            f"❌ У {user_link(target_id, target_name)} нет ника.",
+            disable_mentions=0
+        )
 
 
 # ====== GNICK ======
@@ -438,12 +466,18 @@ async def gnick_handler(message: Message, user: str = None):
     nick = await get_nick(chat_id, target_id)
     
     if nick:
-        await message.answer(f"🔍 {user_link(target_id, target_name)} — {nick}")
+        await message.answer(
+            f"🔍 Никнейм {user_link(target_id, target_name)} — '{nick}'.",
+            disable_mentions=0
+        )
     else:
-        await message.answer(f"🔍 У {user_link(target_id, target_name)} нет ника")
+        await message.answer(
+            f"🔍 У {user_link(target_id, target_name)} нет ника.",
+            disable_mentions=0
+        )
 
 
-# ====== NLIST (с кликабельными именами) ======
+# ====== NLIST ======
 
 @bot.on.message(text=["/nlist"])
 async def nlist_handler(message: Message):
@@ -457,8 +491,7 @@ async def nlist_handler(message: Message):
     text = "📋 Список пользователей с ником:\n\n"
     for i, row in enumerate(all_nicks, 1):
         user_name = await get_user_name(bot.api, row['user_id'])
-        link = user_link(row['user_id'], user_name)
-        text += f"{i}. {link} — {row['nick']}\n"
+        text += f"{i}. {user_link(row['user_id'], user_name)} — {row['nick']}\n"
     
     await message.answer(text, disable_mentions=0)
 
@@ -481,9 +514,14 @@ async def addadmin_handler(message: Message, user: str = None):
         return await message.answer("❌ Укажите пользователя: /addadmin @user")
     
     target_name = await get_user_name(bot.api, target_id)
+    admin_name = await get_user_name(bot.api, message.from_id)
     
     await add_admin(chat_id, target_id, message.from_id)
-    await message.answer(f"✅ {target_name} теперь админ бота")
+    
+    await message.answer(
+        f"✅ {user_link(message.from_id, admin_name)} выдал права админа {user_link(target_id, target_name)}.",
+        disable_mentions=0
+    )
 
 
 # ====== DELADMIN ======
@@ -507,13 +545,20 @@ async def deladmin_handler(message: Message, user: str = None):
         return await message.answer("❌ Нельзя удалить владельца")
     
     target_name = await get_user_name(bot.api, target_id)
+    admin_name = await get_user_name(bot.api, message.from_id)
     
     removed = await remove_admin(chat_id, target_id)
     
     if removed:
-        await message.answer(f"✅ {target_name} больше не админ бота")
+        await message.answer(
+            f"✅ {user_link(message.from_id, admin_name)} забрал права админа у {user_link(target_id, target_name)}.",
+            disable_mentions=0
+        )
     else:
-        await message.answer(f"❌ {target_name} не был админом")
+        await message.answer(
+            f"❌ {user_link(target_id, target_name)} не был админом.",
+            disable_mentions=0
+        )
 
 
 # ====== ADMINLIST ======
