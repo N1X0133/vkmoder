@@ -45,7 +45,6 @@ async def init_db():
     try:
         db_pool = await asyncpg.create_pool(DATABASE_URL)
         async with db_pool.acquire() as conn:
-            # Таблица ников
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS nicks (
                     chat_id BIGINT NOT NULL,
@@ -57,7 +56,6 @@ async def init_db():
                 )
             """)
             
-            # Таблица админов бота
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS bot_admins (
                     chat_id BIGINT NOT NULL,
@@ -201,36 +199,25 @@ async def get_user_name(api: API, user_id: int) -> str:
     return f"id{user_id}"
 
 
-def extract_id(text: str) -> int:
+async def resolve_user(api: API, text: str) -> int:
+    """Получить ID из упоминания, ссылки или ID"""
     text = text.strip()
     
+    # Просто число
     if text.isdigit():
         return int(text)
     
+    # Упоминание [id123|@user]
     match = re.search(r'\[id(\d+)\|', text)
     if match:
         return int(match.group(1))
     
+    # Ссылка vk.com/id123
     match = re.search(r'vk\.com/id(\d+)', text)
     if match:
         return int(match.group(1))
     
-    match = re.search(r'vk\.com/([a-zA-Z0-9_.]+)', text)
-    if match:
-        return 0
-    
-    match = re.search(r'@([a-zA-Z0-9_.]+)', text)
-    if match:
-        return 0
-    
-    return 0
-
-
-async def resolve_user(api: API, text: str) -> int:
-    uid = extract_id(text)
-    if uid > 0:
-        return uid
-    
+    # Ссылка vk.com/username или @username
     match = re.search(r'(?:vk\.com/|@)([a-zA-Z0-9_.]+)', text)
     if match:
         screen_name = match.group(1)
@@ -245,6 +232,15 @@ async def resolve_user(api: API, text: str) -> int:
     return 0
 
 
+def get_target(message: Message, user_arg: str = None) -> int:
+    """Получить ID цели: из ответа или из аргумента"""
+    if message.reply_message:
+        return message.reply_message.from_id
+    elif user_arg:
+        return 0  # Будет разрешено через API
+    return 0
+
+
 # ====== КОМАНДЫ ======
 
 @bot.on.message(text=["/help"])
@@ -253,20 +249,23 @@ async def help_handler(message: Message):
 🤖 Команды бота:
 
 👮 Управление:
-/kick — кикнуть (ответом или /kick @user)
-/ban — забанить (ответом или /ban @user)
+/kick @user — кикнуть
+/ban @user — забанить
 /unban @user — разбанить
 
 📛 Ники:
-/snick Ник — установить ник (ответом)
-/rnick — удалить ник (ответом)
-/gnick — узнать ник (ответом или /gnick @user)
-/nlist — список всех ников в чате
+/snick @user Ник — установить ник
+/rnick @user — удалить ник
+/gnick @user — узнать ник
+/nlist — список всех ников
 
 👑 Админы (владелец):
-/addadmin @user — дать доступ к командам
+/addadmin @user — дать доступ
 /deladmin @user — забрать доступ
-/adminlist — список админов бота
+/adminlist — список админов
+
+💡 Можно использовать:
+@user, vk.com/user, vk.com/id123, ID
 """)
 
 
@@ -279,24 +278,19 @@ async def kick_handler(message: Message, user: str = None):
     if not await check_admin(message, chat_id):
         return
     
-    target_id = 0
+    target_id = get_target(message, user)
     
-    if message.reply_message:
-        target_id = message.reply_message.from_id
-    elif user:
+    if not target_id and user:
         target_id = await resolve_user(bot.api, user)
     
     if not target_id:
-        return await message.answer("❌ Ответьте на сообщение или укажите /kick @user")
+        return await message.answer("❌ Укажите пользователя: /kick @user")
     
     if target_id == message.from_id:
         return await message.answer("❌ Нельзя кикнуть самого себя")
     
     try:
-        await bot.api.messages.remove_chat_user(
-            chat_id=chat_id,
-            member_id=target_id
-        )
+        await bot.api.messages.remove_chat_user(chat_id=chat_id, member_id=target_id)
         target_name = await get_user_name(bot.api, target_id)
         await message.answer(f"✅ {target_name} кикнут")
     except Exception as e:
@@ -312,15 +306,13 @@ async def ban_handler(message: Message, user: str = None):
     if not await check_admin(message, chat_id):
         return
     
-    target_id = 0
+    target_id = get_target(message, user)
     
-    if message.reply_message:
-        target_id = message.reply_message.from_id
-    elif user:
+    if not target_id and user:
         target_id = await resolve_user(bot.api, user)
     
     if not target_id:
-        return await message.answer("❌ Ответьте на сообщение или укажите /ban @user")
+        return await message.answer("❌ Укажите пользователя: /ban @user")
     
     if target_id == message.from_id:
         return await message.answer("❌ Нельзя забанить самого себя")
@@ -328,15 +320,9 @@ async def ban_handler(message: Message, user: str = None):
     target_name = await get_user_name(bot.api, target_id)
     
     try:
-        await bot.api.messages.remove_chat_user(
-            chat_id=chat_id,
-            member_id=target_id
-        )
-        await bot.api.groups.ban(
-            group_id=message.group_id,
-            owner_id=target_id
-        )
-        await message.answer(f"✅ {target_name} забанен\n/unban @id{target_id}")
+        await bot.api.messages.remove_chat_user(chat_id=chat_id, member_id=target_id)
+        await bot.api.groups.ban(group_id=message.group_id, owner_id=target_id)
+        await message.answer(f"✅ {target_name} забанен")
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}")
 
@@ -351,7 +337,7 @@ async def unban_handler(message: Message, user: str = None):
         return
     
     if not user:
-        return await message.answer("❌ Укажите: /unban @user или /unban ссылка")
+        return await message.answer("❌ Укажите: /unban @user")
     
     target_id = await resolve_user(bot.api, user)
     
@@ -361,10 +347,7 @@ async def unban_handler(message: Message, user: str = None):
     target_name = await get_user_name(bot.api, target_id)
     
     try:
-        await bot.api.groups.unban(
-            group_id=message.group_id,
-            owner_id=target_id
-        )
+        await bot.api.groups.unban(group_id=message.group_id, owner_id=target_id)
         await message.answer(f"✅ {target_name} разбанен")
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}")
@@ -372,18 +355,30 @@ async def unban_handler(message: Message, user: str = None):
 
 # ====== SNICK ======
 
-@bot.on.message(text=["/snick", "/snick <nick>"])
-async def snick_handler(message: Message, nick: str = None):
+@bot.on.message(text=["/snick", "/snick <user>", "/snick <user> <nick>"])
+async def snick_handler(message: Message, user: str = None, nick: str = None):
     chat_id = get_chat_id(message)
     
     if not await check_admin(message, chat_id):
         return
     
-    if not message.reply_message:
-        return await message.answer("❌ Ответьте на сообщение пользователя")
+    target_id = get_target(message, user)
+    
+    if not target_id and user:
+        target_id = await resolve_user(bot.api, user)
+    
+    if not target_id:
+        return await message.answer("❌ Укажите пользователя: /snick @user Ник")
+    
+    # Если ник не указан отдельно, проверяем текст после пользователя
+    if not nick:
+        # Убираем команду и пользователя из текста
+        parts = message.text.split()
+        if len(parts) >= 3:
+            nick = " ".join(parts[2:])
     
     if not nick:
-        return await message.answer("❌ Укажите ник: /snick НовыйНик")
+        return await message.answer("❌ Укажите ник: /snick @user НовыйНик")
     
     new_nick = nick.strip()
     
@@ -396,7 +391,6 @@ async def snick_handler(message: Message, nick: str = None):
     if re.search(r'[<>{}()\[\]\\\/]', new_nick):
         return await message.answer("❌ Ник содержит запрещённые символы")
     
-    target_id = message.reply_message.from_id
     target_name = await get_user_name(bot.api, target_id)
     
     await set_nick(chat_id, target_id, new_nick, message.from_id)
@@ -405,17 +399,21 @@ async def snick_handler(message: Message, nick: str = None):
 
 # ====== RNICK ======
 
-@bot.on.message(text=["/rnick"])
-async def rnick_handler(message: Message):
+@bot.on.message(text=["/rnick", "/rnick <user>"])
+async def rnick_handler(message: Message, user: str = None):
     chat_id = get_chat_id(message)
     
     if not await check_admin(message, chat_id):
         return
     
-    if not message.reply_message:
-        return await message.answer("❌ Ответьте на сообщение пользователя")
+    target_id = get_target(message, user)
     
-    target_id = message.reply_message.from_id
+    if not target_id and user:
+        target_id = await resolve_user(bot.api, user)
+    
+    if not target_id:
+        return await message.answer("❌ Укажите пользователя: /rnick @user")
+    
     target_name = await get_user_name(bot.api, target_id)
     
     old_nick = await remove_nick(chat_id, target_id)
@@ -431,15 +429,13 @@ async def rnick_handler(message: Message):
 @bot.on.message(text=["/gnick", "/gnick <user>"])
 async def gnick_handler(message: Message, user: str = None):
     chat_id = get_chat_id(message)
-    target_id = 0
+    target_id = get_target(message, user)
     
-    if message.reply_message:
-        target_id = message.reply_message.from_id
-    elif user:
+    if not target_id and user:
         target_id = await resolve_user(bot.api, user)
     
     if not target_id:
-        return await message.answer("❌ Ответьте на сообщение или /gnick @user")
+        return await message.answer("❌ Укажите пользователя: /gnick @user")
     
     target_name = await get_user_name(bot.api, target_id)
     nick = await get_nick(chat_id, target_id)
@@ -478,15 +474,13 @@ async def addadmin_handler(message: Message, user: str = None):
     if not await check_owner(message):
         return
     
-    target_id = 0
+    target_id = get_target(message, user)
     
-    if message.reply_message:
-        target_id = message.reply_message.from_id
-    elif user:
+    if not target_id and user:
         target_id = await resolve_user(bot.api, user)
     
     if not target_id:
-        return await message.answer("❌ Ответьте на сообщение или /addadmin @user")
+        return await message.answer("❌ Укажите пользователя: /addadmin @user")
     
     target_name = await get_user_name(bot.api, target_id)
     
@@ -503,15 +497,13 @@ async def deladmin_handler(message: Message, user: str = None):
     if not await check_owner(message):
         return
     
-    target_id = 0
+    target_id = get_target(message, user)
     
-    if message.reply_message:
-        target_id = message.reply_message.from_id
-    elif user:
+    if not target_id and user:
         target_id = await resolve_user(bot.api, user)
     
     if not target_id:
-        return await message.answer("❌ Ответьте на сообщение или /deladmin @user")
+        return await message.answer("❌ Укажите пользователя: /deladmin @user")
     
     if target_id in OWNER_IDS:
         return await message.answer("❌ Нельзя удалить владельца")
